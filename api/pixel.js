@@ -6,14 +6,13 @@ const TRANSPARENT_GIF = Buffer.from(
   "base64"
 );
 
-// Gmail/Google image proxy signatures
+// Google proxy UA patterns — used to label device as "Gmail" not for blocking
 const GOOGLE_PROXY_UA = [
   "googleimageproxy", "google-smtp-sts", "feedfetcher-google",
   "googleassociationservice", "via ggpht.com", "google-http-java-client",
   "google favicon",
 ];
 
-// Google IP prefixes (Mountain View proxy servers)
 const GOOGLE_IP_PREFIXES = [
   "66.102.", "66.249.", "64.233.", "72.14.", "74.125.",
   "108.177.", "142.250.", "172.217.", "173.194.", "209.85.",
@@ -32,7 +31,7 @@ function getClientIp(req) {
   return req.headers["x-real-ip"] || req.connection?.remoteAddress || "unknown";
 }
 
-function isGoogleProxy(ip, ua) {
+function isFromGoogleProxy(ip, ua) {
   if (ua) {
     const low = ua.toLowerCase();
     for (const p of GOOGLE_PROXY_UA) {
@@ -100,6 +99,7 @@ module.exports = async function handler(req, res) {
   const recipientEmail = req.query.to || "unknown";
   const subject = req.query.subject || "unknown";
   const senderIp = req.query.sip || "";
+  const sentAt = parseInt(req.query.t) || 0;
 
   try {
     const url = process.env.SUPABASE_URL;
@@ -108,18 +108,21 @@ module.exports = async function handler(req, res) {
       const supabase = createClient(url, key);
       const ip = getClientIp(req);
       const uaString = req.headers["user-agent"] || "unknown";
+      const isProxy = isFromGoogleProxy(ip, uaString);
+      const nowMs = Date.now();
 
-      // FILTER 1: Gmail/Google image proxy — not a real open
-      if (isGoogleProxy(ip, uaString)) {
-        return res.status(200).end(TRANSPARENT_GIF);
-      }
-
-      // FILTER 2: Sender's own IP (auto-detected by extension)
+      // FILTER 1: Sender's own IP (auto-detected by extension)
       if (senderIp && ip === senderIp) {
         return res.status(200).end(TRANSPARENT_GIF);
       }
 
-      // FILTER 3: Manually excluded IPs (env var, comma-separated)
+      // FILTER 2: Prefetch — if pixel was created < 30 seconds ago
+      // AND request is from Google proxy, it's Gmail prefetching, not a real open
+      if (isProxy && sentAt > 0 && (nowMs - sentAt) < 30000) {
+        return res.status(200).end(TRANSPARENT_GIF);
+      }
+
+      // FILTER 3: Manually excluded IPs (optional env var)
       const excludeList = (process.env.EXCLUDE_IPS || "").split(",").map(s => s.trim()).filter(Boolean);
       if (excludeList.includes(ip)) {
         return res.status(200).end(TRANSPARENT_GIF);
@@ -130,8 +133,16 @@ module.exports = async function handler(req, res) {
         return res.status(200).end(TRANSPARENT_GIF);
       }
 
-      const ua = parseUA(uaString);
-      const loc = await geolocate(ip);
+      // For Google proxy opens, we log them but label device as "Gmail"
+      // since we cannot know the real device behind the proxy
+      let ua;
+      if (isProxy) {
+        ua = { device_type: "unknown", os_name: "Gmail proxy", browser_name: "Gmail" };
+      } else {
+        ua = parseUA(uaString);
+      }
+
+      const loc = isProxy ? { city: "unknown", country: "unknown" } : await geolocate(ip);
 
       await supabase.from("email_events").insert({
         tracking_id: trackingId,
