@@ -118,7 +118,7 @@ module.exports = async function handler(req, res) {
 
       // FILTER 2: Prefetch — if pixel was created < 30 seconds ago
       // AND request is from Google proxy, it's Gmail prefetching, not a real open
-      if (isProxy && sentAt > 0 && (nowMs - sentAt) < 30000) {
+      if (isProxy && sentAt > 0 && (nowMs - sentAt) < 5000) {
         return res.status(200).end(TRANSPARENT_GIF);
       }
 
